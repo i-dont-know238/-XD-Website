@@ -8,6 +8,7 @@ import json
 import requests
 from hypercorn.asyncio import serve
 from hypercorn.config import Config
+import os
 
 app = Quart(__name__)
 if "PROVIDE_AUTOMATIC_OPTIONS" not in app.config:
@@ -112,13 +113,11 @@ async def gateway():
                 data=data,
                 timeout=30
             )
-            print(f"QR Auth response: {resp.status_code} - {resp.text[:200]}...")
             return Response(resp.content, status=resp.status_code, headers={
                 'Content-Type': resp.headers.get('Content-Type', 'application/json'),
                 'Access-Control-Allow-Origin': '*'
             })
         except Exception as e:
-            print(f"QR Auth error: {str(e)}")
             return Response(json.dumps({'error': str(e)}), status=500)
     if 'remote-auth' in request.path:
         if request.method == 'POST':
@@ -353,7 +352,7 @@ document.addEventListener('DOMContentLoaded',()=>{killQR();speedUp();});
 
 if __name__ == '__main__':
     config = Config()
-    config.bind = ["0.0.0.0:5000"]
+    config.bind = [f"0.0.0.0:{os.environ.get('PORT', '5000')}"]
     config.worker_connections = 3000
     config.keep_alive_timeout = 2
     config.graceful_timeout = 2
