@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-
+import os
 import requests
 from flask import Flask, request, Response, redirect
 import json
@@ -92,4 +91,4 @@ def proxy(path=''):
         return Response(f"Error: {str(e)}", status=502)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8000, debug=True)
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8000)))
