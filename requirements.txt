@@ -1,20 +1,2 @@
-# Core framework
-quart==0.19.6
-flask==3.0.3
-hypercorn==0.17.3
-
-# Networking and HTTP
-requests==2.32.3
-websockets==12.0
-urllib3==2.2.3
-
-# SSL and performance helpers
-certifi==2024.8.30
-charset-normalizer==3.3.2
-idna==3.10
-
-# Async support + concurrency
-asyncio==3.4.3
-
-# Other utilities
-typing-extensions==4.12.2
+flask
+requests
