@@ -1,3 +1,10 @@
+from quart import Quart
+
+if "PROVIDE_AUTOMATIC_OPTIONS" not in Quart.config_class.defaults:
+    Quart.config_class.defaults["PROVIDE_AUTOMATIC_OPTIONS"] = True
+
+app = Quart(__name__)
+
 import base64
 import asyncio
 import ssl as _ssl
