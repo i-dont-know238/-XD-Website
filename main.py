@@ -1,70 +1,90 @@
 from flask import Flask, request, Response, redirect
 import requests
+import re
 import os
 from urllib.parse import urljoin, urlparse
 
 app = Flask(__name__)
 BASE_URL = "https://beaufortsc.powerschool.com"
+UP_NETLOC = urlparse(BASE_URL).netloc
 session = requests.Session()
 
-def full_url(path):
-    if path.startswith("http://") or path.startswith("https://"):
-        return path
-    return urljoin(BASE_URL + "/", path)
+def local_base():
+    return request.host_url.rstrip('/')
 
-def transform_content(content, content_type):
-    if "text/html" in content_type:
-        text = content.decode("utf-8", errors="replace")
-        text = text.replace(BASE_URL, request.host_url.rstrip("/"))
-        text = text.replace('href="/', f'href="{request.host_url}')
-        text = text.replace("src=\"/", f'src="{request.host_url}')
-        text = text.replace("action=\"/", f'action="{request.host_url}')
-        return text.encode("utf-8")
-    elif "javascript" in content_type or "css" in content_type:
-        text = content.decode("utf-8", errors="replace")
-        text = text.replace(BASE_URL, request.host_url.rstrip("/"))
-        return text.encode("utf-8")
-    return content
+def rewrite_abs_urls(text):
+    return text.replace("http://" + UP_NETLOC, local_base()).replace("https://" + UP_NETLOC, local_base())
 
-def forward_request(url):
-    headers = {k: v for k, v in request.headers if k.lower() not in ("host", "content-length")}
-    headers["Host"] = "beaufortsc.powerschool.com"
-    headers["Referer"] = BASE_URL
-    cookies = request.cookies
+def rewrite_html_attrs(text):
+    text = re.sub(r'(?i)(href|src|action)\s*=\s*"https?://'+re.escape(UP_NETLOC)+r'([^"]*)"', lambda m: f'{m.group(1)}="{local_base()}{m.group(2)}"', text)
+    text = re.sub(r"(?i)(href|src|action)\s*=\s*'https?://"+re.escape(UP_NETLOC)+r"([^']*)'", lambda m: f"{m.group(1)}='{local_base()}{m.group(2)}'", text)
+    return text
 
+def sanitize_resp_headers(h):
+    blocked = {"content-security-policy","x-content-security-policy","x-webkit-csp","x-frame-options","referrer-policy","content-encoding","transfer-encoding","strict-transport-security"}
+    return {k:v for k,v in h.items() if k.lower() not in blocked}
+
+def upstream_headers():
+    h = {k: v for k, v in request.headers if k.lower() not in ("host","content-length","accept-encoding","cookie")}
+    h["Host"] = UP_NETLOC
+    h["Referer"] = BASE_URL if "referer" in {k.lower() for k in request.headers.keys()} else BASE_URL
+    if "origin" in {k.lower() for k in request.headers.keys()}:
+        h["Origin"] = BASE_URL
+    return h
+
+def make_request(url):
     method = request.method
-    data = request.form if method == "POST" else None
+    headers = upstream_headers()
+    data = request.get_data()
     try:
-        resp = session.request(method, url, headers=headers, cookies=cookies, data=data, allow_redirects=False, timeout=30)
+        resp = session.request(method, url, params=None, data=data if method in ("POST","PUT","PATCH","DELETE") else None, headers=headers, cookies=request.cookies, allow_redirects=False, timeout=45)
     except Exception as e:
-        return Response(f"Error contacting {BASE_URL}: {e}", status=500)
+        return Response(f"upstream error: {e}", status=502)
 
     if 300 <= resp.status_code < 400 and "Location" in resp.headers:
-        new_loc = resp.headers["Location"]
-        if not urlparse(new_loc).netloc:
-            new_loc = urljoin(BASE_URL, new_loc)
-        new_loc = new_loc.replace(BASE_URL, request.host_url.rstrip("/"))
-        r = redirect(new_loc, code=resp.status_code)
+        loc = resp.headers["Location"]
+        if not urlparse(loc).netloc:
+            loc = urljoin(BASE_URL, loc)
+        loc = rewrite_abs_urls(loc)
+        r = redirect(loc, code=resp.status_code)
         for c in resp.cookies:
             r.set_cookie(c.name, c.value, path="/")
         return r
 
-    content_type = resp.headers.get("content-type", "text/html")
-    body = transform_content(resp.content, content_type)
-    r = Response(body, status=resp.status_code, content_type=content_type)
+    ctype = resp.headers.get("content-type","").lower()
+    body = resp.content
+
+    if "text/html" in ctype:
+        t = body.decode("utf-8", errors="replace")
+        t = rewrite_abs_urls(t)
+        t = rewrite_html_attrs(t)
+        body = t.encode("utf-8")
+    elif "javascript" in ctype or "json" in ctype or "text/css" in ctype:
+        t = body.decode("utf-8", errors="replace")
+        t = rewrite_abs_urls(t)
+        body = t.encode("utf-8")
+
+    r = Response(body, status=resp.status_code)
+    rh = sanitize_resp_headers(resp.headers)
+    if "content-type" in {k.lower() for k in rh}:
+        r.headers["Content-Type"] = rh.get("Content-Type", rh.get("content-type"))
+    if "cache-control" in {k.lower() for k in rh}:
+        r.headers["Cache-Control"] = rh.get("Cache-Control", rh.get("cache-control"))
+    if "last-modified" in {k.lower() for k in rh}:
+        r.headers["Last-Modified"] = rh.get("Last-Modified", rh.get("last-modified"))
     for c in resp.cookies:
         r.set_cookie(c.name, c.value, path="/")
     return r
 
-@app.route("/", defaults={"path": ""}, methods=["GET", "POST"])
-@app.route("/<path:path>", methods=["GET", "POST"])
-def catch_all(path):
-    url = full_url(path)
+@app.route("/", defaults={"path": ""}, methods=["GET","POST","PUT","PATCH","DELETE","HEAD","OPTIONS"])
+@app.route("/<path:path>", methods=["GET","POST","PUT","PATCH","DELETE","HEAD","OPTIONS"])
+def all_paths(path):
+    target = urljoin(BASE_URL + "/", path)
     if request.query_string:
-        url += f"?{request.query_string.decode()}"
-    return forward_request(url)
+        target += ("&" if "?" in target else "?") + request.query_string.decode()
+    return make_request(target)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print(f"🌐 Flask reverse proxy running on port {port}")
+    print(f"🚀 Proxy running on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
