@@ -1,15 +1,19 @@
 from flask import Flask, request, Response, redirect, make_response
-import requests, re, os, secrets, threading
+import requests
+import re
+import os
+import secrets
+import threading
 from urllib.parse import urljoin, urlparse
 
 app = Flask(__name__)
+
 BASE_URL = "https://beaufortsc.powerschool.com"
 UP = urlparse(BASE_URL)
 UP_HOST = UP.netloc
 SESSION_COOKIE = "PS_PROXY_ID"
 _sessions = {}
 _lock = threading.Lock()
-MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
 ABS_HOST_RE = re.compile(r'(?i)\bhttps?://' + re.escape(UP_HOST))
 ATTR_ABS_DBL = re.compile(r'(?i)(href|src|action)\s*=\s*"https?://' + re.escape(UP_HOST) + r'([^"]*)"')
@@ -20,13 +24,12 @@ REL_PATH_DBL = re.compile(r'(?i)(href|src|action)\s*=\s*"(\/[^"]*)"')
 REL_PATH_SGL = re.compile(r"(?i)(href|src|action)\s*=\s*'(\/[^']*)'")
 
 BLOCKED_RESP_HEADERS = {
-    "content-security-policy","x-content-security-policy","x-webkit-csp","x-frame-options",
-    "referrer-policy","content-encoding","transfer-encoding","strict-transport-security",
-    "content-length","connection","keep-alive","upgrade","proxy-authenticate",
-    "proxy-authorization","te","trailer"
+    "content-security-policy","x-content-security-policy","x-webkit-csp",
+    "x-frame-options","referrer-policy","content-encoding","transfer-encoding",
+    "strict-transport-security","content-length","connection","keep-alive","upgrade",
+    "proxy-authenticate","proxy-authorization","te","trailer"
 }
-HOP_BY_HOP_REQ = {"host","content-length","accept-encoding","connection","keep-alive","upgrade",
-                  "proxy-authorization","proxy-authenticate","te","trailer","cookie"}
+HOP_BY_HOP_REQ = {"host","content-length","accept-encoding","connection","keep-alive","upgrade","proxy-authorization","proxy-authenticate","te","trailer","cookie"}
 
 def is_secure_request():
     xf_proto = request.headers.get("X-Forwarded-Proto", "")
@@ -49,26 +52,26 @@ def get_client_session():
 def upstream_headers():
     h = {k: v for k, v in request.headers if k.lower() not in HOP_BY_HOP_REQ}
     h["Host"] = UP_HOST
-    h["User-Agent"] = MOBILE_UA
-    h["Referer"] = BASE_URL
+    h["User-Agent"] = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
     h["Origin"] = BASE_URL
+    h["Referer"] = BASE_URL
     return h
 
 def sanitize_resp_headers(h):
     return {k: v for k, v in h.items() if k.lower() not in BLOCKED_RESP_HEADERS}
 
-def rewrite_text_urls(t):
-    t = ABS_HOST_RE.sub(local_base(), t)
-    t = ATTR_ABS_DBL.sub(lambda m: f'{m.group(1)}="{local_base()}{m.group(2)}"', t)
-    t = ATTR_ABS_SGL.sub(lambda m: f"{m.group(1)}='{local_base()}{m.group(2)}'", t)
-    t = ATTR_SCHEMELESS_DBL.sub(lambda m: f'{m.group(1)}="{local_base()}{m.group(2)}"', t)
-    t = ATTR_SCHEMELESS_SGL.sub(lambda m: f"{m.group(1)}='{local_base()}{m.group(2)}'", t)
-    return t
+def rewrite_text_urls(text):
+    text = ABS_HOST_RE.sub(local_base(), text)
+    text = ATTR_ABS_DBL.sub(lambda m: f'{m.group(1)}="{local_base()}{m.group(2)}"', text)
+    text = ATTR_ABS_SGL.sub(lambda m: f"{m.group(1)}='{local_base()}{m.group(2)}'", text)
+    text = ATTR_SCHEMELESS_DBL.sub(lambda m: f'{m.group(1)}="{local_base()}{m.group(2)}"', text)
+    text = ATTR_SCHEMELESS_SGL.sub(lambda m: f"{m.group(1)}='{local_base()}{m.group(2)}'", text)
+    return text
 
-def rewrite_rel_attrs(t):
-    t = REL_PATH_DBL.sub(lambda m: f'{m.group(1)}="{m.group(2)}"', t)
-    t = REL_PATH_SGL.sub(lambda m: f"{m.group(1)}='{m.group(2)}'", t)
-    return t
+def rewrite_rel_attrs(text):
+    text = REL_PATH_DBL.sub(lambda m: f'{m.group(1)}="{m.group(2)}"', text)
+    text = REL_PATH_SGL.sub(lambda m: f"{m.group(1)}='{m.group(2)}'", text)
+    return text
 
 def forward_to_upstream(url):
     sid, sess = get_client_session()
