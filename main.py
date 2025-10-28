@@ -1,112 +1,127 @@
-from flask import Flask, request, redirect, url_for, Response
-import requests
-import re
+from flask import Flask, request, Response, stream_with_context
+import requests, re, os
+from flask_compress import Compress
 
 app = Flask(__name__)
+Compress(app)
 
 BASE_URL = "https://beaufortsc.powerschool.com"
-session = requests.Session()
 
 def _scheme():
     return request.headers.get("X-Forwarded-Proto", request.scheme)
 
-def _host_root():
+def _root():
     return f"{_scheme()}://{request.host}/"
-
-def replace_urls(html):
-    html = re.sub(r'(href|src|action)="(/[^"]*)"', r'\1="/proxy\2"', html)
-    html = re.sub(r"(href|src|action)='(/[^']*)'", r"\1='/proxy\2'", html)
-    html = html.replace(BASE_URL, _host_root() + "proxy")
-    return html
 
 def _clean_headers():
     hop = {"host","connection","keep-alive","proxy-authenticate","proxy-authorization","te","trailers","transfer-encoding","upgrade","content-length"}
-    headers = {k:v for k,v in request.headers.items() if k.lower() not in hop}
-    headers["Host"] = "beaufortsc.powerschool.com"
-    return headers
+    h = {k:v for k,v in request.headers.items() if k.lower() not in hop}
+    h["Host"] = "beaufortsc.powerschool.com"
+    h["Referer"] = BASE_URL
+    return h
 
-def _set_cookies(resp_obj, upstream_resp):
+def _rewrite_location(up, resp):
+    if "location" in up.headers:
+        loc = up.headers["location"]
+        if loc.startswith(BASE_URL):
+            loc = loc[len(BASE_URL):]
+            resp.headers["location"] = f"/proxy{loc}"
+        elif loc.startswith("/"):
+            resp.headers["location"] = f"/proxy{loc}"
+
+def _set_cookies(resp, up):
     secure = _scheme() == "https"
-    for c in upstream_resp.cookies:
-        resp_obj.set_cookie(
+    for c in up.cookies:
+        resp.set_cookie(
             c.name,
             c.value,
             path="/",
             secure=secure,
-            httponly=False,
-            samesite="Lax"
+            httponly=True
         )
 
-def _rewrite_location(upstream_resp, resp_obj):
-    if "location" in upstream_resp.headers:
-        loc = upstream_resp.headers["location"]
-        if loc.startswith(BASE_URL):
-            loc = loc[len(BASE_URL):]
-            resp_obj.headers["location"] = f"/proxy{loc}"
-        elif loc.startswith("/"):
-            resp_obj.headers["location"] = f"/proxy{loc}"
+def _cache_headers(ct):
+    if any(p in ct for p in ["image/", "font/", "video/", "audio/", "application/octet-stream"]):
+        return {"Cache-Control": "public, max-age=86400, immutable"}
+    if "text/css" in ct or "javascript" in ct:
+        return {"Cache-Control": "public, max-age=3600"}
+    return {}
 
-def _build_response(upstream_resp, raw_content):
-    headers = {k:v for k,v in upstream_resp.headers.items() if k.lower() not in {"content-length","content-encoding","transfer-encoding","connection"}}
-    return Response(raw_content, status=upstream_resp.status_code, headers=headers)
+def _resp_from_up(up, body=None, extra_headers=None):
+    hdrs = {k:v for k,v in up.headers.items() if k.lower() not in {"content-length","content-encoding","transfer-encoding","connection"}}
+    if extra_headers:
+        hdrs.update(extra_headers)
+    status = up.status_code
+    if body is None:
+        def gen():
+            for chunk in up.iter_content(chunk_size=64 * 1024):
+                if chunk:
+                    yield chunk
+        return Response(stream_with_context(gen()), status=status, headers=hdrs)
+    return Response(body, status=status, headers=hdrs)
+
+def _replace_urls_html(b):
+    s = b.decode("utf-8", errors="replace")
+    s = re.sub(r'(href|src|action)="(/[^"]*)"', r'\1="/proxy\2"', s)
+    s = re.sub(r"(href|src|action)='(/[^']*)'", r"\1='/proxy\2'", s)
+    s = s.replace(BASE_URL, _root() + "proxy")
+    return s.encode("utf-8")
+
+def _replace_urls_text(b):
+    s = b.decode("utf-8", errors="replace")
+    s = s.replace(BASE_URL, _root() + "proxy")
+    return s.encode("utf-8")
+
+def _forward(method, url, needs_text_rewrite=False):
+    headers = _clean_headers()
+    timeout = (10, 45)
+    files = None
+    data = None
+    json_data = None
+    if method in {"POST","PUT","PATCH","DELETE"}:
+        if request.files:
+            files = {k:(v.filename, v.stream, v.mimetype or "application/octet-stream") for k,v in request.files.items()}
+            data = request.form
+        else:
+            data = request.get_data()
+    stream = not needs_text_rewrite
+    up = requests.request(method, url, headers=headers, cookies=request.cookies, data=data, files=files, allow_redirects=False, timeout=timeout, stream=stream)
+    ct = up.headers.get("content-type","").lower()
+    if needs_text_rewrite or "text/html" in ct or "javascript" in ct or "text/css" in ct:
+        body = up.content
+        if "text/html" in ct:
+            body = _replace_urls_html(body)
+        else:
+            body = _replace_urls_text(body)
+        resp = _resp_from_up(up, body=body, extra_headers=_cache_headers(ct))
+    else:
+        resp = _resp_from_up(up, body=None, extra_headers=_cache_headers(ct))
+    _set_cookies(resp, up)
+    _rewrite_location(up, resp)
+    return resp
 
 @app.route("/", methods=["GET","POST"])
 def home():
     if request.method == "POST":
-        return redirect(url_for("home"))
-    r = session.get(f"{BASE_URL}/public/home.html", headers=_clean_headers(), allow_redirects=False)
-    content_type = r.headers.get("content-type","").lower()
-    body = r.content
-    if "text/html" in content_type:
-        body = replace_urls(body.decode("utf-8", errors="replace")).encode("utf-8")
-    resp = _build_response(r, body)
-    _set_cookies(resp, r)
-    _rewrite_location(r, resp)
-    return resp
+        return Response("", status=303, headers={"Location": "/"})
+    url = f"{BASE_URL}/public/home.html"
+    return _forward("GET", url, needs_text_rewrite=True)
 
-@app.route("/proxy/<path:path>", methods=["GET","POST","PUT","DELETE","PATCH","OPTIONS"])
+@app.route("/proxy/<path:path>", methods=["GET","POST","PUT","DELETE","PATCH","OPTIONS","HEAD"])
 def proxy(path):
     url = f"{BASE_URL}/{path}"
     if request.query_string:
         url = f"{url}?{request.query_string.decode('utf-8', errors='ignore')}"
-    headers = _clean_headers()
-    headers["Referer"] = BASE_URL
-    method = request.method.upper()
-    data = request.get_data() if method in {"POST","PUT","PATCH","DELETE"} else None
-    r = session.request(method, url, headers=headers, data=data, allow_redirects=False)
-    content_type = r.headers.get("content-type","").lower()
-    body = r.content
-    if "text/html" in content_type:
-        body = replace_urls(body.decode("utf-8", errors="replace")).encode("utf-8")
-    elif "javascript" in content_type or "text/css" in content_type:
-        body = body.decode("utf-8", errors="replace").replace(BASE_URL, _host_root() + "proxy").encode("utf-8")
-    resp = _build_response(r, body)
-    _set_cookies(resp, r)
-    _rewrite_location(r, resp)
-    return resp
+    return _forward(request.method.upper(), url)
 
-@app.route("/<path:path>", methods=["GET","POST","PUT","DELETE","OPTIONS","PATCH"])
+@app.route("/<path:path>", methods=["GET","POST","PUT","DELETE","OPTIONS","PATCH","HEAD"])
 def catch_all(path):
     if path == "eade-to-the-call-make-to-looken-the-good-What-ge":
         return Response("", content_type="application/javascript")
     url = f"{BASE_URL}/{path}"
     if request.query_string:
         url = f"{url}?{request.query_string.decode('utf-8', errors='ignore')}"
-    headers = _clean_headers()
-    headers["Referer"] = BASE_URL
-    method = request.method.upper()
-    data = request.get_data() if method in {"POST","PUT","PATCH","DELETE"} else None
-    r = session.request(method, url, headers=headers, data=data, allow_redirects=False)
-    content_type = r.headers.get("content-type","").lower()
-    body = r.content
-    if "text/html" in content_type:
-        body = replace_urls(body.decode("utf-8", errors="replace")).encode("utf-8")
-    elif "javascript" in content_type or "text/css" in content_type:
-        body = body.decode("utf-8", errors="replace").replace(BASE_URL, _host_root() + "proxy").encode("utf-8")
-    resp = _build_response(r, body)
-    _set_cookies(resp, r)
-    _rewrite_location(r, resp)
-    return resp
+    return _forward(request.method.upper(), url)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=False, threaded=True)
