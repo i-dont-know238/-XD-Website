@@ -7,7 +7,7 @@ import urllib.parse
 app = Flask(__name__)
 
 BASE_URL = "https://beaufortsc.powerschool.com"
-PROXY_PREFIX = "/proxy"
+PROXY_PREFIX = "/pr0xy"
 
 session = requests.Session()
 session.headers.update({"User-Agent": "Mozilla/5.0 (compatible; Proxy/1.0)"})
