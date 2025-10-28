@@ -80,6 +80,12 @@ def forward_to_upstream(url):
     method = request.method
     headers = upstream_headers()
     data = request.get_data() if method in ("POST","PUT","PATCH","DELETE") else None
+
+    # Log details
+    print(f"[PROXY] {sid} -> {method} {url}")
+    print(f"[PROXY] Headers: {headers}")
+    print(f"[PROXY] Cookies: {request.cookies}")
+
     try:
         resp = sess.request(method, url, headers=headers, data=data, allow_redirects=False, timeout=45)
     except Exception as e:
@@ -87,6 +93,9 @@ def forward_to_upstream(url):
         r.headers["Cache-Control"] = "no-store"
         r.set_cookie(SESSION_COOKIE, sid, httponly=True, samesite="Lax", secure=is_secure_request(), path="/")
         return r
+
+    print(f"[PROXY] Response code: {resp.status_code}")
+    print(f"[PROXY] Response headers: {resp.headers}")
 
     if 300 <= resp.status_code < 400 and "Location" in resp.headers:
         loc = resp.headers["Location"]
@@ -101,7 +110,10 @@ def forward_to_upstream(url):
     ctype = resp.headers.get("content-type","").lower()
     body = resp.content
     if any(t in ctype for t in ("text/html","text/css","javascript","json")):
-        t = body.decode("utf-8", errors="replace")
+        try:
+            t = body.decode("utf-8", errors="replace")
+        except:
+            t = body.decode("latin-1", errors="replace")
         t = rewrite_text_urls(t)
         t = rewrite_rel_attrs(t)
         body = t.encode("utf-8")
