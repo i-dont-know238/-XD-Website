@@ -4,7 +4,7 @@ import re
 import os
 import secrets
 import threading
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse, parse_qsl, urlencode
 
 app = Flask(__name__)
 
@@ -22,6 +22,8 @@ ATTR_SCHEMELESS_DBL = re.compile(r'(?i)(href|src|action)\s*=\s*"//' + re.escape(
 ATTR_SCHEMELESS_SGL = re.compile(r"(?i)(href|src|action)\s*=\s*'//" + re.escape(UP_HOST) + r"([^']*)'")
 REL_PATH_DBL = re.compile(r'(?i)(href|src|action)\s*=\s*"(\/[^"]*)"')
 REL_PATH_SGL = re.compile(r"(?i)(href|src|action)\s*=\s*'(\/[^']*)'")
+BASE_TAG_DBL = re.compile(r'(?i)<base[^>]*\bhref\s*=\s*"([^"]+)"')
+BASE_TAG_SGL = re.compile(r"(?i)<base[^>]*\bhref\s*=\s*'([^']+)'")
 
 BLOCKED_RESP_HEADERS = {
     "content-security-policy","x-content-security-policy","x-webkit-csp",
@@ -30,6 +32,8 @@ BLOCKED_RESP_HEADERS = {
     "proxy-authenticate","proxy-authorization","te","trailer"
 }
 HOP_BY_HOP_REQ = {"host","content-length","accept-encoding","connection","keep-alive","upgrade","proxy-authorization","proxy-authenticate","te","trailer","cookie"}
+
+MOBILE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
 
 def is_secure_request():
     xf_proto = request.headers.get("X-Forwarded-Proto", "")
@@ -52,9 +56,12 @@ def get_client_session():
 def upstream_headers():
     h = {k: v for k, v in request.headers if k.lower() not in HOP_BY_HOP_REQ}
     h["Host"] = UP_HOST
-    h["User-Agent"] = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+    h["User-Agent"] = MOBILE_UA
     h["Origin"] = BASE_URL
     h["Referer"] = BASE_URL
+    h["Accept"] = request.headers.get("Accept", "*/*")
+    h["Accept-Language"] = request.headers.get("Accept-Language", "en-US,en;q=0.9")
+    h["X-Requested-With"] = "XMLHttpRequest"
     return h
 
 def sanitize_resp_headers(h):
@@ -66,12 +73,33 @@ def rewrite_text_urls(text):
     text = ATTR_ABS_SGL.sub(lambda m: f"{m.group(1)}='{local_base()}{m.group(2)}'", text)
     text = ATTR_SCHEMELESS_DBL.sub(lambda m: f'{m.group(1)}="{local_base()}{m.group(2)}"', text)
     text = ATTR_SCHEMELESS_SGL.sub(lambda m: f"{m.group(1)}='{local_base()}{m.group(2)}'", text)
+    text = BASE_TAG_DBL.sub(lambda m: f'<base href="{ABS_HOST_RE.sub(local_base(), m.group(1))}"', text)
+    text = BASE_TAG_SGL.sub(lambda m: f"<base href='{ABS_HOST_RE.sub(local_base(), m.group(1))}'", text)
     return text
 
 def rewrite_rel_attrs(text):
     text = REL_PATH_DBL.sub(lambda m: f'{m.group(1)}="{m.group(2)}"', text)
     text = REL_PATH_SGL.sub(lambda m: f"{m.group(1)}='{m.group(2)}'", text)
     return text
+
+def try_mobile_fallback(url, sess, headers, data):
+    p = urlparse(url)
+    path = p.path
+    qs = p.query
+    if "/guardian/scores.html" not in path:
+        return None
+    q = dict(parse_qsl(qs, keep_blank_values=True))
+    q["mobile"] = "1"
+    candidate1 = urlunparse((p.scheme, p.netloc, "/guardian/scores.html", "", urlencode(q, doseq=True), ""))
+    resp1 = sess.request(request.method, candidate1, headers=headers, data=data, allow_redirects=False, timeout=45)
+    if resp1.status_code == 200:
+        return resp1
+    for cand in ["/guardian/m/scores.html", "/guardian/mobile/scores.html"]:
+        u = urlunparse((p.scheme, p.netloc, cand, "", urlencode(dict(parse_qsl(qs, keep_blank_values=True)), doseq=True), ""))
+        r = sess.request(request.method, u, headers=headers, data=data, allow_redirects=False, timeout=45)
+        if r.status_code == 200:
+            return r
+    return None
 
 def forward_to_upstream(url):
     sid, sess = get_client_session()
@@ -94,9 +122,13 @@ def forward_to_upstream(url):
         r.headers["Cache-Control"] = "no-store"
         r.set_cookie(SESSION_COOKIE, sid, httponly=True, samesite="Lax", secure=is_secure_request(), path="/")
         return r
+    if resp.status_code != 200:
+        fb = try_mobile_fallback(url, sess, headers, data)
+        if fb is not None:
+            resp = fb
     ctype = resp.headers.get("content-type","").lower()
     body = resp.content
-    if any(t in ctype for t in ("text/html","text/css","javascript","json")):
+    if any(t in ctype for t in ("text/html","text/css","javascript","json","xml")):
         try:
             t = body.decode("utf-8", errors="replace")
         except:
