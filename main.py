@@ -1,90 +1,85 @@
-from flask import Flask, request, Response, redirect
+from flask import Flask, request, Response, redirect, session
 import requests
-import re
-import os
+import re, os, uuid
 from urllib.parse import urljoin, urlparse
 
 app = Flask(__name__)
+app.secret_key = os.urandom(32)
 BASE_URL = "https://beaufortsc.powerschool.com"
-UP_NETLOC = urlparse(BASE_URL).netloc
-session = requests.Session()
+UP = urlparse(BASE_URL).netloc
+user_sessions = {}
 
-def local_base():
+def local_host():
     return request.host_url.rstrip('/')
 
-def rewrite_abs_urls(text):
-    return text.replace("http://" + UP_NETLOC, local_base()).replace("https://" + UP_NETLOC, local_base())
-
-def rewrite_html_attrs(text):
-    text = re.sub(r'(?i)(href|src|action)\s*=\s*"https?://'+re.escape(UP_NETLOC)+r'([^"]*)"', lambda m: f'{m.group(1)}="{local_base()}{m.group(2)}"', text)
-    text = re.sub(r"(?i)(href|src|action)\s*=\s*'https?://"+re.escape(UP_NETLOC)+r"([^']*)'", lambda m: f"{m.group(1)}='{local_base()}{m.group(2)}'", text)
+def rewrite_urls(text):
+    text = text.replace(f"https://{UP}", local_host())
+    text = text.replace(f"http://{UP}", local_host())
+    text = re.sub(r'(?i)(href|src|action)\s*=\s*"(/[^"]*)"', lambda m: f'{m.group(1)}="{local_host()}{m.group(2)}"', text)
+    text = re.sub(r"(?i)(href|src|action)\s*=\s*'(/[^']*)'", lambda m: f"{m.group(1)}='{local_host()}{m.group(2)}'", text)
     return text
 
-def sanitize_resp_headers(h):
-    blocked = {"content-security-policy","x-content-security-policy","x-webkit-csp","x-frame-options","referrer-policy","content-encoding","transfer-encoding","strict-transport-security"}
+def clean_headers(h):
+    blocked = {'content-security-policy','x-frame-options','content-encoding','transfer-encoding','strict-transport-security','referrer-policy'}
     return {k:v for k,v in h.items() if k.lower() not in blocked}
 
-def upstream_headers():
-    h = {k: v for k, v in request.headers if k.lower() not in ("host","content-length","accept-encoding","cookie")}
-    h["Host"] = UP_NETLOC
-    h["Referer"] = BASE_URL if "referer" in {k.lower() for k in request.headers.keys()} else BASE_URL
-    if "origin" in {k.lower() for k in request.headers.keys()}:
-        h["Origin"] = BASE_URL
-    return h
+def get_client_session():
+    sid = session.get("sid")
+    if not sid or sid not in user_sessions:
+        sid = str(uuid.uuid4())
+        session["sid"] = sid
+        user_sessions[sid] = requests.Session()
+    return user_sessions[sid]
 
-def make_request(url):
-    method = request.method
-    headers = upstream_headers()
-    data = request.get_data()
+def forward(url):
+    s = get_client_session()
+    headers = {k:v for k,v in request.headers if k.lower() not in ('host','content-length','accept-encoding')}
+    headers['Host'] = UP
+    headers['Referer'] = BASE_URL
+    data = request.get_data() if request.method in ('POST','PUT','PATCH') else None
     try:
-        resp = session.request(method, url, params=None, data=data if method in ("POST","PUT","PATCH","DELETE") else None, headers=headers, cookies=request.cookies, allow_redirects=False, timeout=45)
+        r = s.request(request.method, url, headers=headers, data=data, cookies=s.cookies, allow_redirects=False, timeout=30)
     except Exception as e:
-        return Response(f"upstream error: {e}", status=502)
+        return Response(f"Proxy error: {e}", status=502)
 
-    if 300 <= resp.status_code < 400 and "Location" in resp.headers:
-        loc = resp.headers["Location"]
+    if 300 <= r.status_code < 400 and 'Location' in r.headers:
+        loc = r.headers['Location']
         if not urlparse(loc).netloc:
             loc = urljoin(BASE_URL, loc)
-        loc = rewrite_abs_urls(loc)
-        r = redirect(loc, code=resp.status_code)
-        for c in resp.cookies:
-            r.set_cookie(c.name, c.value, path="/")
-        return r
+        loc = rewrite_urls(loc)
+        resp = redirect(loc)
+        for c in r.cookies:
+            resp.set_cookie(c.name, c.value, path='/')
+        return resp
 
-    ctype = resp.headers.get("content-type","").lower()
-    body = resp.content
+    ctype = r.headers.get('content-type','').lower()
+    body = r.content
 
-    if "text/html" in ctype:
-        t = body.decode("utf-8", errors="replace")
-        t = rewrite_abs_urls(t)
-        t = rewrite_html_attrs(t)
-        body = t.encode("utf-8")
-    elif "javascript" in ctype or "json" in ctype or "text/css" in ctype:
-        t = body.decode("utf-8", errors="replace")
-        t = rewrite_abs_urls(t)
-        body = t.encode("utf-8")
+    if 'text/html' in ctype:
+        t = body.decode('utf-8', errors='replace')
+        t = rewrite_urls(t)
+        t = re.sub(r"https?://"+re.escape(UP), local_host(), t)
+        body = t.encode('utf-8')
+    elif 'javascript' in ctype or 'json' in ctype or 'css' in ctype:
+        t = body.decode('utf-8', errors='replace')
+        t = rewrite_urls(t)
+        body = t.encode('utf-8')
 
-    r = Response(body, status=resp.status_code)
-    rh = sanitize_resp_headers(resp.headers)
-    if "content-type" in {k.lower() for k in rh}:
-        r.headers["Content-Type"] = rh.get("Content-Type", rh.get("content-type"))
-    if "cache-control" in {k.lower() for k in rh}:
-        r.headers["Cache-Control"] = rh.get("Cache-Control", rh.get("cache-control"))
-    if "last-modified" in {k.lower() for k in rh}:
-        r.headers["Last-Modified"] = rh.get("Last-Modified", rh.get("last-modified"))
-    for c in resp.cookies:
-        r.set_cookie(c.name, c.value, path="/")
-    return r
+    resp = Response(body, status=r.status_code)
+    h = clean_headers(r.headers)
+    for k,v in h.items(): resp.headers[k] = v
+    for c in r.cookies: resp.set_cookie(c.name, c.value, path='/')
+    return resp
 
-@app.route("/", defaults={"path": ""}, methods=["GET","POST","PUT","PATCH","DELETE","HEAD","OPTIONS"])
-@app.route("/<path:path>", methods=["GET","POST","PUT","PATCH","DELETE","HEAD","OPTIONS"])
-def all_paths(path):
-    target = urljoin(BASE_URL + "/", path)
+@app.route('/', defaults={'path': ''}, methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'])
+@app.route('/<path:path>', methods=['GET','POST','PUT','PATCH','DELETE','OPTIONS'])
+def route_all(path):
+    url = urljoin(BASE_URL + '/', path)
     if request.query_string:
-        target += ("&" if "?" in target else "?") + request.query_string.decode()
-    return make_request(target)
+        url += ('&' if '?' in url else '?') + request.query_string.decode()
+    return forward(url)
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Proxy running on port {port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    print(f"🚀 Proxy ready on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
