@@ -1,78 +1,61 @@
-from flask import Flask, request, Response, redirect, url_for
-import requests, re
+from flask import Flask, request, Response
+import requests
+import re
 
 app = Flask(__name__)
+
 BASE_URL = "https://beaufortsc.powerschool.com"
-session = requests.Session()
 
 def replace_urls(html):
-    html = html.replace(BASE_URL, f"{request.host_url.rstrip('/')}/proxy")
-    html = re.sub(r'(href|src|action)="(/[^"]*)"', lambda m: f'{m.group(1)}="/proxy{m.group(2)}"', html)
-    html = re.sub(r"(href|src|action)='(/[^']*)'", lambda m: f"{m.group(1)}='/proxy{m.group(2)}'", html)
+    html = re.sub(r'(href|src|action)="(/[^"]*)"', r'\1="/proxy\2"', html)
+    html = re.sub(r"(href|src|action)='(/[^']*)'", r"\1='/proxy\2'", html)
     return html
 
-def sync_cookies_from_browser():
-    session.cookies.clear()
-    for k, v in request.cookies.items():
-        session.cookies.set(k, v)
-
-def apply_cookies_to_response(r, resp):
-    for c in r.cookies:
-        resp.set_cookie(c.name, c.value, expires=c.expires, path='/', secure=False, samesite='Lax')
-
-@app.route('/', methods=['GET', 'POST'])
-def home():
-    sync_cookies_from_browser()
-    r = session.get(f"{BASE_URL}/public/home.html", allow_redirects=True)
-    html = replace_urls(r.text)
-    resp = Response(html, content_type='text/html')
-    apply_cookies_to_response(r, resp)
-    return resp
-
-@app.route('/proxy/<path:path>', methods=['GET', 'POST'])
-def proxy(path):
-    sync_cookies_from_browser()
-    url = f"{BASE_URL}/{path}"
-    if request.query_string:
-        url += f"?{request.query_string.decode('utf-8', 'ignore')}"
-
-    headers = {k: v for k, v in request.headers.items()}
+def proxy_request(url):
+    headers = {k: v for k, v in request.headers if k.lower() != 'host'}
     headers['Host'] = 'beaufortsc.powerschool.com'
     headers['Referer'] = BASE_URL
     headers.pop('Content-Length', None)
-    headers.pop('Cookie', None)
+    cookies = request.cookies
 
     if request.method == 'POST':
-        if request.files:
-            r = session.post(url, data=request.form or None, files=request.files or None, headers=headers)
-        else:
-            r = session.post(url, data=request.get_data(), headers=headers)
+        resp = requests.post(url, data=request.form, headers=headers, cookies=cookies, allow_redirects=True)
     else:
-        r = session.get(url, headers=headers, allow_redirects=True)
+        resp = requests.get(url, headers=headers, cookies=cookies, allow_redirects=True)
 
-    data = r.content
-    ct = r.headers.get('content-type', '').lower()
+    content_type = resp.headers.get('content-type', '').lower()
+    content = resp.content
 
-    if 'text/html' in ct:
-        data = replace_urls(data.decode('utf-8', 'replace')).encode()
-    elif 'javascript' in ct:
-        data = data.decode('utf-8', 'replace').replace(BASE_URL, f"{request.host_url.rstrip('/')}/proxy").encode()
+    if 'text/html' in content_type:
+        html = content.decode('utf-8', errors='replace')
+        html = replace_urls(html)
+        content = html.encode('utf-8')
+    elif 'javascript' in content_type:
+        js = content.decode('utf-8', errors='replace')
+        js = js.replace(BASE_URL, f"{request.host_url}proxy")
+        content = js.encode('utf-8')
 
-    resp = Response(data, content_type=r.headers.get('content-type', 'text/plain'))
-    apply_cookies_to_response(r, resp)
+    response = Response(content, content_type=resp.headers.get('content-type', 'text/html'))
+    for cookie_name, cookie_value in resp.cookies.items():
+        response.set_cookie(cookie_name, cookie_value, path='/')
+    return response
 
-    if 'location' in r.headers:
-        loc = r.headers['location']
-        if loc.startswith(BASE_URL):
-            loc = loc[len(BASE_URL):]
-        if loc.startswith('/'):
-            resp.headers['location'] = f"/proxy{loc}"
+@app.route('/')
+def index():
+    url = f"{BASE_URL}/public/home.html"
+    return proxy_request(url)
 
-    return resp
+@app.route('/proxy/<path:path>', methods=['GET', 'POST'])
+def proxy(path):
+    url = f"{BASE_URL}/{path}"
+    if request.query_string:
+        url += f"?{request.query_string.decode()}"
+    return proxy_request(url)
 
 @app.route('/<path:path>', methods=['GET', 'POST'])
-def catch_all(path):
-    return redirect(f"/proxy/{path}")
+def passthrough(path):
+    if path.endswith('.html'):
+        return proxy_request(f"{BASE_URL}/{path}")
+    return Response("Not Found", status=404)
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=True, threaded=True)
+# no app.run() for vercel
