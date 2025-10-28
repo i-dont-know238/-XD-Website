@@ -12,6 +12,7 @@ def replace_urls(html_content):
     html_content = re.sub(pattern, r'\1="/proxy\2"', html_content)
     pattern_single = r"(href|src|action)='(/[^']*)'"
     html_content = re.sub(pattern_single, r"\1='/proxy\2'", html_content)
+    html_content = html_content.replace(BASE_URL, f"/proxy")
     return html_content
 
 def copy_cookies_to_response(resp, r):
@@ -22,7 +23,6 @@ def copy_cookies_to_response(resp, r):
             expires=cookie.expires,
             path='/',
             secure=False,
-            httponly=cookie.has_nonstandard_attr('HttpOnly'),
             samesite='Lax'
         )
 
@@ -31,26 +31,29 @@ def sync_browser_cookies():
     for k, v in request.cookies.items():
         session.cookies.set(k, v)
 
-@app.route('/', methods=['GET', 'POST'])
-def home():
-    if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        return redirect(url_for('home'))
-
+def make_upstream_request(method, url, **kwargs):
     sync_browser_cookies()
-    response = session.get(f"{BASE_URL}/public/home.html", allow_redirects=True)
-    html_content = replace_urls(response.text)
-    resp = Response(html_content, content_type='text/html')
-    copy_cookies_to_response(resp, response)
-    return resp
+    response = session.request(method, url, allow_redirects=False, **kwargs)
+
+    # follow upstream redirects and rewrite location
+    while response.is_redirect or response.is_permanent_redirect:
+        location = response.headers.get('Location', '')
+        if location.startswith(BASE_URL):
+            next_path = location[len(BASE_URL):]
+        else:
+            next_path = location
+        if next_path.startswith('/'):
+            url = f"{BASE_URL}{next_path}"
+        else:
+            break
+        response = session.request('GET', url, allow_redirects=False)
+    return response
 
 @app.route('/proxy/<path:path>', methods=['GET', 'POST'])
 def proxy(path):
-    sync_browser_cookies()
     url = f"{BASE_URL}/{path}"
     if request.query_string:
-        url = f"{url}?{request.query_string.decode('utf-8', errors='ignore')}"
+        url += f"?{request.query_string.decode('utf-8', errors='ignore')}"
 
     headers = {k: v for k, v in request.headers.items()}
     headers['Host'] = 'beaufortsc.powerschool.com'
@@ -59,9 +62,9 @@ def proxy(path):
     headers.pop('Cookie', None)
 
     if request.method == 'POST':
-        response = session.request('POST', url, data=request.form or request.get_data(), files=request.files or None, headers=headers, allow_redirects=False)
+        response = make_upstream_request('POST', url, data=request.form or request.get_data(), files=request.files or None, headers=headers)
     else:
-        response = session.request('GET', url, headers=headers, allow_redirects=False)
+        response = make_upstream_request('GET', url, headers=headers)
 
     content = response.content
     content_type = response.headers.get('content-type', '').lower()
@@ -70,65 +73,28 @@ def proxy(path):
         html_content = replace_urls(content.decode('utf-8', errors='replace'))
         content = html_content.encode('utf-8')
     elif 'javascript' in content_type:
-        js_content = content.decode('utf-8', errors='replace').replace(BASE_URL, f"{request.host_url}proxy")
+        js_content = content.decode('utf-8', errors='replace').replace(BASE_URL, f"/proxy")
         content = js_content.encode('utf-8')
 
     resp = Response(content, content_type=response.headers.get('content-type', 'text/plain'))
     copy_cookies_to_response(resp, response)
 
+    # rewrite location headers if needed
     if 'location' in response.headers:
-        location = response.headers['location']
-        if location.startswith(BASE_URL):
-            location = location[len(BASE_URL):]
-        if location.startswith('/'):
-            resp.headers['location'] = f'/proxy{location}'
+        loc = response.headers['location']
+        if loc.startswith(BASE_URL):
+            loc = loc[len(BASE_URL):]
+        if loc.startswith('/'):
+            resp.headers['location'] = f'/proxy{loc}'
 
     return resp
 
-@app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
-def catch_all(path):
-    if path == "eade-to-the-call-make-to-looken-the-good-What-ge":
-        return Response("", content_type="application/javascript")
-
-    sync_browser_cookies()
-    url = f"{BASE_URL}/{path}"
-    if request.query_string:
-        url = f"{url}?{request.query_string.decode('utf-8', errors='ignore')}"
-
-    headers = {k: v for k, v in request.headers.items()}
-    headers['Host'] = 'beaufortsc.powerschool.com'
-    headers['Referer'] = f"{BASE_URL}/{path}"
-    headers.pop('Content-Length', None)
-    headers.pop('Cookie', None)
-
-    if request.method == 'POST':
-        if request.files:
-            response = session.request('POST', url, data=request.form or None, files=request.files or None, headers=headers, allow_redirects=False)
-        else:
-            response = session.request('POST', url, data=request.get_data(), headers=headers, allow_redirects=False)
-    else:
-        response = session.request('GET', url, headers=headers, allow_redirects=False)
-
-    content = response.content
-    content_type = response.headers.get('content-type', '').lower()
-
-    if 'text/html' in content_type:
-        html_content = replace_urls(content.decode('utf-8', errors='replace'))
-        content = html_content.encode('utf-8')
-    elif 'javascript' in content_type:
-        js_content = content.decode('utf-8', errors='replace').replace(BASE_URL, f"{request.host_url}proxy")
-        content = js_content.encode('utf-8')
-
-    resp = Response(content, content_type=response.headers.get('content-type', 'text/plain'))
+@app.route('/', methods=['GET'])
+def home():
+    response = make_upstream_request('GET', f"{BASE_URL}/public/home.html")
+    html_content = replace_urls(response.text)
+    resp = Response(html_content, content_type='text/html')
     copy_cookies_to_response(resp, response)
-
-    if 'location' in response.headers:
-        location = response.headers['location']
-        if location.startswith(BASE_URL):
-            location = location[len(BASE_URL):]
-        if location.startswith('/'):
-            resp.headers['location'] = f'/proxy{location}'
-
     return resp
 
 if __name__ == '__main__':
