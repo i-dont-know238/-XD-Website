@@ -1,6 +1,7 @@
 from flask import Flask, request, Response
 import requests
 import re
+import os
 
 app = Flask(__name__)
 
@@ -12,16 +13,18 @@ def replace_urls(html):
     return html
 
 def proxy_request(url):
-    headers = {k: v for k, v in request.headers if k.lower() != 'host'}
+    headers = {k: v for k, v in request.headers if k.lower() not in ('host', 'content-length', 'cookie')}
     headers['Host'] = 'beaufortsc.powerschool.com'
     headers['Referer'] = BASE_URL
-    headers.pop('Content-Length', None)
     cookies = request.cookies
 
-    if request.method == 'POST':
-        resp = requests.post(url, data=request.form, headers=headers, cookies=cookies, allow_redirects=True)
-    else:
-        resp = requests.get(url, headers=headers, cookies=cookies, allow_redirects=True)
+    try:
+        if request.method == 'POST':
+            resp = requests.post(url, data=request.form, headers=headers, cookies=cookies, allow_redirects=True, timeout=20)
+        else:
+            resp = requests.get(url, headers=headers, cookies=cookies, allow_redirects=True, timeout=20)
+    except Exception as e:
+        return Response(f"Upstream request error: {e}", status=500)
 
     content_type = resp.headers.get('content-type', '').lower()
     content = resp.content
@@ -40,7 +43,7 @@ def proxy_request(url):
         response.set_cookie(cookie_name, cookie_value, path='/')
     return response
 
-@app.route('/')
+@app.route('/', methods=['GET'])
 def index():
     url = f"{BASE_URL}/public/home.html"
     return proxy_request(url)
@@ -54,8 +57,11 @@ def proxy(path):
 
 @app.route('/<path:path>', methods=['GET', 'POST'])
 def passthrough(path):
-    if path.endswith('.html'):
+    if path.endswith('.html') or '/' in path:
         return proxy_request(f"{BASE_URL}/{path}")
     return Response("Not Found", status=404)
 
-# no app.run() for vercel
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    print(f"🚀 Starting Flask on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
