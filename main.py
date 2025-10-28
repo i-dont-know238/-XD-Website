@@ -1,143 +1,72 @@
-from flask import Flask, request, Response, make_response, redirect
+from flask import Flask, request, Response, redirect
 import requests
 import re
 import os
-import urllib.parse
+from urllib.parse import urljoin, urlparse
 
 app = Flask(__name__)
-
 BASE_URL = "https://beaufortsc.powerschool.com"
-PROXY_PREFIX = "/pr0xy"
-
 session = requests.Session()
-session.headers.update({"User-Agent": "Mozilla/5.0 (compatible; Proxy/1.0)"})
 
-def build_proxy_url(path):
-    return f"{PROXY_PREFIX}/{path}"
+def clean_html(content):
+    content = re.sub(r'(href|src|action)="(/[^"]*)"', lambda m: f'{m.group(1)}="{urljoin("/", m.group(2))}"', content)
+    content = re.sub(r"(href|src|action)='(/[^']*)'", lambda m: f'{m.group(1)}=\'{urljoin("/", m.group(2))}\'', content)
+    return content
 
-def replace_urls(html, base_host):
-    html = re.sub(
-        r'(href|src|action)=["\'](/[^"\']*)["\']',
-        lambda m: f'{m.group(1)}="{build_proxy_url(m.group(2)[1:])}"',
-        html,
-        flags=re.IGNORECASE
-    )
-    html = re.sub(
-        rf'(href|src|action)=["\']({re.escape(BASE_URL)}/?)([^"\']*)["\']',
-        lambda m: f'{m.group(1)}="{build_proxy_url(m.group(3))}"',
-        html,
-        flags=re.IGNORECASE
-    )
-    return html
-
-def proxy_request(target_url):
-    headers = {
-        k: v for k, v in request.headers.items()
-        if k.lower() not in ('host', 'content-length', 'cookie', 'connection')
-    }
+def make_request(url):
+    headers = {k: v for k, v in request.headers if k.lower() not in ('host', 'content-length')}
     headers['Host'] = 'beaufortsc.powerschool.com'
     headers['Referer'] = BASE_URL
-    headers['Origin'] = BASE_URL
-
-    cookies = {k: v for k, v in request.cookies.items()}
+    cookies = request.cookies
+    method = request.method
 
     try:
-        if request.method == 'POST':
-            resp = session.post(
-                target_url,
-                data=request.form,
-                headers=headers,
-                cookies=cookies,
-                allow_redirects=False,
-                timeout=30
-            )
+        if method == 'POST':
+            resp = session.post(url, data=request.form, headers=headers, cookies=cookies, allow_redirects=False, timeout=30)
         else:
-            resp = session.get(
-                target_url,
-                headers=headers,
-                cookies=cookies,
-                params=request.args,
-                allow_redirects=False,
-                timeout=30
-            )
+            resp = session.get(url, headers=headers, cookies=cookies, allow_redirects=False, timeout=30)
     except Exception as e:
-        return Response(f"Proxy error: {str(e)}", status=502)
+        return Response(f"Error contacting {BASE_URL}: {e}", status=500)
 
-    excluded_headers = ['content-length', 'transfer-encoding', 'content-encoding']
-    response_headers = [
-        (name, value) for name, value in resp.headers.items()
-        if name.lower() not in excluded_headers
-    ]
+    if 300 <= resp.status_code < 400 and 'Location' in resp.headers:
+        new_url = resp.headers['Location']
+        if not urlparse(new_url).netloc:
+            new_url = urljoin(BASE_URL, new_url)
+        response = redirect(new_url.replace(BASE_URL, request.host_url.rstrip('/')))
+        for c in resp.cookies:
+            response.set_cookie(c.name, c.value, path='/')
+        return response
 
-    content_type = resp.headers.get('Content-Type', '').lower()
-    content = resp.raw.read()
-
-    if resp.status_code in (301, 302, 303, 307, 308):
-        location = resp.headers.get('Location', '')
-        if location.startswith(BASE_URL):
-            new_location = build_proxy_url(location[len(BASE_URL):].lstrip('/'))
-        elif location.startswith('/'):
-            new_location = build_proxy_url(location.lstrip('/'))
-        else:
-            new_location = location
-        return redirect(new_location, code=resp.status_code)
+    content_type = resp.headers.get('content-type', '').lower()
+    body = resp.content
 
     if 'text/html' in content_type:
-        try:
-            html = content.decode('utf-8', errors='replace')
-            html = replace_urls(html, BASE_URL)
-            content = html.encode('utf-8')
-            content_type = 'text/html; charset=utf-8'
-        except:
-            pass
-    elif 'javascript' in content_type or 'css' in content_type:
-        try:
-            text = content.decode('utf-8', errors='replace')
-            text = text.replace(BASE_URL, request.host_url.rstrip('/') + PROXY_PREFIX)
-            text = re.sub(
-                r'url\((["\']?)/',
-                lambda m: f'url({m.group(1)}{build_proxy_url("")}'.lstrip('/'),
-                text
-            )
-            content = text.encode('utf-8')
-        except:
-            pass
+        html = body.decode('utf-8', errors='replace')
+        html = html.replace(BASE_URL, request.host_url.rstrip('/'))
+        html = clean_html(html)
+        body = html.encode('utf-8')
+    elif 'javascript' in content_type:
+        js = body.decode('utf-8', errors='replace')
+        js = js.replace(BASE_URL, request.host_url.rstrip('/'))
+        body = js.encode('utf-8')
 
-    response = make_response(Response(content, status=resp.status_code))
-    response.headers = dict(response_headers)
-    response.headers['Content-Type'] = content_type
-
-    for name, value in resp.cookies.items():
-        response.set_cookie(
-            name, value,
-            domain=request.host,
-            path='/',
-            secure=resp.cookies.get(name).get('secure', False),
-            httponly=True,
-            samesite='Lax'
-        )
-
+    response = Response(body, content_type=resp.headers.get('content-type', 'text/html'))
+    for c in resp.cookies:
+        response.set_cookie(c.name, c.value, path='/')
     return response
 
-@app.route('/', methods=['GET'])
+@app.route('/', methods=['GET', 'POST'])
 def root():
-    return proxy_request(f"{BASE_URL}/public/home.html")
+    return make_request(f"{BASE_URL}/public/home.html")
 
-@app.route(f'{PROXY_PREFIX}/', methods=['GET', 'POST'])
-@app.route(f'{PROXY_PREFIX}/<path:subpath>', methods=['GET', 'POST'])
-def proxy(subpath=''):
-    path = subpath or ''
-    url = f"{BASE_URL}/{path.lstrip('/')}"
+@app.route('/<path:path>', methods=['GET', 'POST'])
+def proxy(path):
+    url = urljoin(BASE_URL + '/', path)
     if request.query_string:
         url += f"?{request.query_string.decode()}"
-    return proxy_request(url)
-
-@app.route('/<path:catchall>', methods=['GET', 'POST'])
-def fallback(catchall):
-    if catchall.endswith(('.html', '.js', '.css', '.json')) or '/' in catchall:
-        return proxy_request(f"{BASE_URL}/{catchall}")
-    return Response("Not Found", status=404)
+    return make_request(url)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
+    print(f"🚀 Proxy running on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
