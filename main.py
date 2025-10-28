@@ -1,35 +1,17 @@
 from flask import Flask, request, Response, stream_with_context
-import requests, re, os, threading, datetime
+import requests, re, os
 from flask_compress import Compress
 
 app = Flask(__name__)
 Compress(app)
 
 BASE_URL = "https://beaufortsc.powerschool.com"
-LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ips.txt")
-_lock = threading.Lock()
 
 def _scheme():
     return request.headers.get("X-Forwarded-Proto", request.scheme)
 
 def _root():
     return f"{_scheme()}://{request.host}/"
-
-def _client_ip():
-    xff = request.headers.get("X-Forwarded-For")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.remote_addr or ""
-
-@app.before_request
-def _log_ip():
-    try:
-        line = f'{datetime.datetime.utcnow().isoformat()} {_client_ip()} {request.method} {request.path}\n'
-        with _lock:
-            with open(LOG_PATH, "a", encoding="utf-8") as f:
-                f.write(line)
-    except Exception:
-        pass
 
 def _clean_headers():
     hop = {"host","connection","keep-alive","proxy-authenticate","proxy-authorization","te","trailers","transfer-encoding","upgrade","content-length"}
@@ -50,7 +32,13 @@ def _rewrite_location(up, resp):
 def _set_cookies(resp, up):
     secure = _scheme() == "https"
     for c in up.cookies:
-        resp.set_cookie(c.name, c.value, path="/", secure=secure, httponly=True)
+        resp.set_cookie(
+            c.name,
+            c.value,
+            path="/",
+            secure=secure,
+            httponly=True
+        )
 
 def _cache_headers(ct):
     if any(p in ct for p in ["image/", "font/", "video/", "audio/", "application/octet-stream"]):
@@ -66,7 +54,7 @@ def _resp_from_up(up, body=None, extra_headers=None):
     status = up.status_code
     if body is None:
         def gen():
-            for chunk in up.iter_content(chunk_size=65536):
+            for chunk in up.iter_content(chunk_size=64 * 1024):
                 if chunk:
                     yield chunk
         return Response(stream_with_context(gen()), status=status, headers=hdrs)
@@ -89,6 +77,7 @@ def _forward(method, url, needs_text_rewrite=False):
     timeout = (10, 45)
     files = None
     data = None
+    json_data = None
     if method in {"POST","PUT","PATCH","DELETE"}:
         if request.files:
             files = {k:(v.filename, v.stream, v.mimetype or "application/octet-stream") for k,v in request.files.items()}
