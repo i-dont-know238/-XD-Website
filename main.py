@@ -3,7 +3,7 @@ import requests, re, uuid
 from datetime import datetime, timezone
 
 app = Flask(__name__)
-app.secret_key = "super_secret_render_key"
+app.secret_key = "Gdnvjpj#eazxkfUbcSqPQ6TUb+UsXE53"
 
 BASE_URL = "https://beaufortsc.powerschool.com"
 user_sessions = {}
