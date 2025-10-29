@@ -22,10 +22,25 @@ def _scheme():
 def _host_root():
     return f"{_scheme()}://{request.host}/"
 
-def replace_urls(html):
+def custom_html_filter(html, path):
+    if path in ("/guardian/home.html", "/"):
+        html = re.sub(
+            r'<p>\s*Copyright © 2005-2025 PowerSchool Group LLC and/or its affiliate\(s\)\. All rights reserved\.<br>All trademarks are either owned or licensed by PowerSchool Group LLC and/or its affiliates\.\s*</p>',
+            '<p>Welcome to powerschool Better V1 none of your info is logged/stored have fun</p>',
+            html
+        )
+        html = re.sub(
+            r'<a href="https://www\.powerschool\.com/privacy/" rel="noreferrer" target="_blank">Privacy Policy</a>',
+            '',
+            html
+        )
+    return html
+
+def replace_urls(html, path):
     html = re.sub(r'(href|src|action)="(/[^"]*)"', r'\1="\2"', html)
     html = re.sub(r"(href|src|action)='(/[^']*)'", r"\1='\2'", html)
     html = html.replace(BASE_URL, _host_root())
+    html = custom_html_filter(html, path)
     return html
 
 def _clean_headers():
@@ -92,8 +107,9 @@ def root():
         return Response("", 302, {"Location": "/public/home.html"})
     r = s.get(f"{BASE_URL}/public/home.html", headers=_clean_headers(), allow_redirects=False)
     body = r.content
+    path = "/"
     if "text/html" in r.headers.get("content-type","").lower():
-        body = replace_urls(body.decode("utf-8", errors="replace")).encode()
+        body = replace_urls(body.decode("utf-8", errors="replace"), path).encode()
     resp = Response(body, r.status_code, content_type=r.headers.get("content-type","text/html"))
     _set_cookies(resp, r)
     _rewrite_location(r, resp)
@@ -161,8 +177,9 @@ def proxy(path):
 
     body = r.content
     ctype = r.headers.get("content-type","").lower()
+    req_path = "/" + path if not path.startswith("/") else path
     if "text/html" in ctype:
-        body = replace_urls(body.decode("utf-8", errors="replace")).encode()
+        body = replace_urls(body.decode("utf-8", errors="replace"), req_path).encode()
     elif "javascript" in ctype or "text/css" in ctype:
         body = body.decode("utf-8", errors="replace").replace(BASE_URL, _host_root()).encode()
 
